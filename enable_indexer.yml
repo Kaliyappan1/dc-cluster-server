@@ -1,0 +1,12 @@
+---
+- name: Configuring Manager Node
+  command: /opt/splunk/bin/splunk edit cluster-config -mode manager -replication_factor 3 -search_factor 2 -secret SoftManiaKey -cluster_label Indexer_Cluster -auth admin:{{ splunk_admin_password }} --accept-license --no-prompt
+  changed_when: true
+  register: cluster_output
+
+- name: Debug Cluster Config Output
+  debug:
+    var: cluster_output
+
+- name: Restart Splunk after Configuring Manager Node
+  command: /opt/splunk/bin/splunk restart

@@ -1,0 +1,10 @@
+aws_region     = "us-east-1"
+instance_name  = "Mohammad Alsyouf"
+usermail       = "mohammadalsyouf77@gmail.com"
+key_name       = "Mohammad Alsyouf"
+instance_type  = "t3.medium"
+storage_size   = 30
+quotahours     = 37
+hoursperday    = 2
+category       = "splunk-dc"
+planstartdate  = "2025-07-09T04:45:00Z"

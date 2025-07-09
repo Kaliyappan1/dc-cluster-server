@@ -1,0 +1,506 @@
+---
+- name: Setup Splunk Cluster Environment
+  hosts: all
+  gather_facts: no
+  become: yes
+  vars_files:
+    - group_vars/all.yml
+  tasks:
+    - name: Pause to ensure all server is up
+      run_once: true
+      pause:
+        seconds: 180
+
+    - name: Set Hostname for Each Instance
+      command: sudo hostnamectl set-hostname {{ inventory_hostname }}
+
+    - name: Set servername for Each Instance
+      become_user: root
+      shell: "/opt/splunk/bin/splunk set servername {{ inventory_hostname }} -auth admin:{{ splunk_admin_password }} --answer-yes"
+      args:
+        executable: /bin/bash
+    
+    - name: Set default-hostname for Each Instance
+      become_user: root
+      shell: "/opt/splunk/bin/splunk set default-hostname {{ inventory_hostname }} -auth admin:{{ splunk_admin_password }} --answer-yes"
+      args:
+        executable: /bin/bash
+
+- name: Setup Splunk Cluster Environment
+  hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Format hostname for banner
+      set_fact:
+        banner_name: "{{ inventory_hostname | regex_replace('[._\"]', ' ') | trim }}"
+
+    - name: Set Global Banner Configuration
+      copy:
+        dest: /opt/splunk/etc/system/local/global-banner.conf
+        content: |
+          [BANNER_MESSAGE_SINGLETON]
+          global_banner.visible = true
+          global_banner.message = "{{ banner_name }}"
+          global_banner.background_color = green
+      notify: Restart Splunk
+
+  handlers:
+    - name: Restart Splunk
+      command: /opt/splunk/bin/splunk restart
+
+
+- hosts: ClusterMaster
+  become: yes
+  become_user: root
+  tasks:
+    - name: Configuring Manager Node
+      command:
+        cmd: /opt/splunk/bin/splunk edit cluster-config -mode manager -replication_factor 3 -search_factor 2 -secret SoftManiaKey -cluster_label Indexer_Cluster -auth admin:{{ splunk_admin_password }} --accept-license --no-prompt
+      changed_when: true
+      register: cluster_output
+
+    - name: Debug Cluster Config Output
+      debug:
+        var: cluster_output
+    
+    - name: splunk restart for Configuring Manager Node
+      become: yes
+      become_user: root
+      command:
+        cmd: /opt/splunk/bin/splunk restart
+           
+- hosts: indexers
+  tasks:
+    - name: Configuring Peer Nodes
+      become: yes
+      become_user: root
+      command:
+        cmd: /opt/splunk/bin/splunk edit cluster-config -mode peer -manager_uri https://{{ ClusterMaster.private_ip }}:8089 -replication_port 9887 -secret SoftManiaKey -auth admin:{{ splunk_admin_password }} --accept-license --no-prompt
+
+    - name: splunk restart for Configuring Manager Node
+      become: yes
+      become_user: root
+      command:
+        cmd: /opt/splunk/bin/splunk restart
+
+- hosts: Management_server
+  gather_facts: no
+  tasks:
+    - name: enable the clustering in Management_server
+      become: yes
+      become_user: splunk
+      copy: 
+         dest: /opt/splunk/etc/system/local/server.conf
+         content: |
+            [shclustering]
+            pass4SymmKey = SoftManiaSHClusterKey
+            shcluster_label = shcluster1
+
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+ 
+- name: search Head 1
+  gather_facts: no
+  hosts: SH1
+  user: root
+  become: yes
+  tasks:
+      
+    - name: configure search peer 
+      command: /opt/splunk/bin/splunk init shcluster-config -auth admin:{{ splunk_admin_password }} -mgmt_uri https://{{ search_heads.SH1.private_ip }}:8089 -replication_port 9000 -replication_factor 3 -conf_deploy_fetch_url http://{{ Management_server.private_ip }}:8089 -secret SoftManiaSHClusterKey -shcluster_label shcluster1 --accept-license --no-prompt
+
+    - name: restart splunk
+      command: /opt/splunk/bin/splunk restart
+
+- name: search Head 2
+  hosts: SH2
+  gather_facts: no
+  user: root
+  become: yes
+  tasks:
+      
+    - name: configure search peer 
+      command: /opt/splunk/bin/splunk init shcluster-config -auth admin:{{ splunk_admin_password }} -mgmt_uri https://{{ search_heads.SH2.private_ip }}:8089 -replication_port 9000 -replication_factor 3 -conf_deploy_fetch_url http://{{ Management_server.private_ip }}:8089 -secret SoftManiaSHClusterKey -shcluster_label shcluster1
+
+    - name: restart splunk
+      command: /opt/splunk/bin/splunk restart
+
+- name: search Head 3
+  hosts: SH3
+  gather_facts: no
+  user: root
+  become: yes
+  tasks:
+      
+    - name: configure search peer 
+      command: /opt/splunk/bin/splunk init shcluster-config -auth admin:{{ splunk_admin_password }} -mgmt_uri https://{{ search_heads.SH3.private_ip }}:8089 -replication_port 9000 -replication_factor 3 -conf_deploy_fetch_url http://{{ Management_server.private_ip }}:8089 -secret SoftManiaSHClusterKey -shcluster_label shcluster1
+
+    - name: restart splunk
+      command: /opt/splunk/bin/splunk restart
+    
+    - name: Pause to SH1 is restarting
+      run_once: true
+      pause:
+        seconds: 20
+
+- name: shc 1 captain
+  hosts: SH1
+  gather_facts: no
+  user: root
+  become: yes
+  tasks:
+    - name: Making cluster captain
+      command: /opt/splunk/bin/splunk bootstrap shcluster-captain -servers_list "https://{{ search_heads.SH1.private_ip }}:8089,https://{{ search_heads.SH2.private_ip }}:8089,https://{{ search_heads.SH3.private_ip }}:8089" -auth admin:{{ splunk_admin_password }}
+   
+- hosts: IFs
+  user: splunk
+  become: yes
+  tasks:
+    - name: Configure Intermediate Forwarders
+      command: /opt/splunk/bin/splunk set deploy-poll {{ Management_server.private_ip }}:8089 -auth admin:{{ splunk_admin_password }}
+
+    - name: restart splunk
+      command: /opt/splunk/bin/splunk restart
+
+- name: Connect Search Head Cluster with Indexer Cluster
+  hosts: search_heads
+  gather_facts: no
+  become_user: splunk
+  become: yes
+  tasks:
+    - name: configure indexer cluster with search head 
+      command : /opt/splunk/bin/splunk edit cluster-config -mode searchhead -manager_uri https://{{ ClusterMaster.private_ip }}:8089 -secret SoftManiaKey -auth admin:{{ splunk_admin_password }}
+    
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+     
+- hosts: ClusterMaster
+  tasks:
+    - name: Connect Forwarders with Indexer Cluster
+      become: yes
+      become_user: splunk
+      copy: 
+         dest: /opt/splunk/etc/system/local/server.conf
+         content: |
+            [indexer_discovery]
+            pass4SymmKey = SoftManiaSHClusterKey
+            polling_rate = 10
+            indexerWeightByDiskCapacity = true
+
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+
+- name: Configure Splunk Deployment Apps
+  hosts: Management_server
+  gather_facts: no
+  become: yes
+  become_user: splunk
+  tasks:
+    - name: Ensure directory structure exists in Management_server
+      file:
+        path: "/opt/splunk/etc/deployment-apps/ORG_general_infra_config/local"
+        state: directory
+        mode: '0755'
+      
+
+    - name: Create outputs.conf file
+      copy:
+        dest: "/opt/splunk/etc/deployment-apps/ORG_general_infra_config/local/outputs.conf"
+        content: |
+          [indexer_discovery:manager1]
+          pass4SymmKey = SoftManiaSHClusterKey
+          manager_uri = https://{{ ClusterMaster.private_ip }}:8089
+          [tcpout:group1]
+          autoLBFrequency = 30
+          forceTimebasedAutoLB = true
+          indexerDiscovery = manager1
+          useACK=true
+          [tcpout]
+          defaultGroup = group1
+        mode: '0644'
+      
+
+    - name: List directory contents for verification
+      command: "ls -l /opt/splunk/etc/deployment-apps/ORG_general_infra_config/local"
+      register: ls_output
+      
+
+    - name: Display directory contents
+      debug:
+        msg: "{{ ls_output.stdout_lines }}"
+
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+
+- name: Configure Splunk Search Head Cluster Apps
+  hosts: Management_server
+  gather_facts: yes
+  become: yes
+  become_user: splunk 
+  tasks:
+    - name: Ensure directory structure exists in Management_server
+      file:
+        path: "/opt/splunk/etc/shcluster/apps/ORG_general_infra_config/local"
+        state: directory
+        mode: '0755'
+      
+
+    - name: Create outputs.conf file
+      copy:
+        dest: "/opt/splunk/etc/shcluster/apps/ORG_general_infra_config/local/outputs.conf"
+        content: |
+          [indexer_discovery:manager1]
+          pass4SymmKey = SoftManiaSHClusterKey
+          manager_uri = https://{{ ClusterMaster.private_ip }}:8089
+          [tcpout:group1]
+          autoLBFrequency = 30
+          forceTimebasedAutoLB = true
+          indexerDiscovery = manager1
+          useACK=true
+          [tcpout]
+          defaultGroup = group1
+        mode: '0644'
+      
+
+    - name: List directory contents for verification
+      command: "ls -l /opt/splunk/etc/shcluster/apps/ORG_general_infra_config/local"
+      register: ls_output
+
+
+    - name: Display directory contents
+      debug:
+        msg: "{{ ls_output.stdout_lines }}"
+    
+    - name: Pause
+      run_once: true
+      pause:
+        seconds: 30
+
+    - name: Apply Search Head Cluster Bundle
+      command: |
+        /opt/splunk/bin/splunk apply shcluster-bundle --answer-yes \
+        -target https://{{ search_heads.SH1.private_ip }}:8089 -auth admin:{{ splunk_admin_password }}
+      register: shcluster_output
+      
+
+    - name: Display shcluster bundle apply output
+      debug:
+        msg: "{{ shcluster_output.stdout_lines }}"
+
+   
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+
+- name: Configure Splunk Cluster Manager Outputs
+  hosts: ClusterMaster
+  gather_facts: no
+  become: yes
+  become_user: splunk
+  tasks:
+    - name: Ensure directory structure exists in ClusterMaster
+      file:
+        path: "/opt/splunk/etc/apps/ORG_general_infra_config/local"
+        state: directory
+        mode: '0755'
+      
+
+    - name: Create outputs.conf file
+      copy:
+        dest: "/opt/splunk/etc/apps/ORG_general_infra_config/local/outputs.conf"
+        content: |
+          [indexer_discovery:manager1]
+          pass4SymmKey =SoftManiaSHClusterKey
+          manager_uri = https://{{ ClusterMaster.private_ip }}:8089
+          [tcpout:group1]
+          autoLBFrequency = 30
+          forceTimebasedAutoLB = true
+          indexerDiscovery = manager1
+          useACK=true
+          [tcpout]
+          defaultGroup = group1
+        mode: '0644'
+
+    - name: List directory contents for verification
+      command: "ls -l /opt/splunk/etc/apps/ORG_general_infra_config/local"
+      register: ls_output
+
+    - name: Display directory contents
+      debug:
+        msg: "{{ ls_output.stdout_lines }}"
+
+
+    - name: restart
+      become: yes
+      become_user: root
+      command:
+            cmd: /opt/splunk/bin/splunk restart
+
+    - name: Pause
+      run_once: true
+      pause:
+        seconds: 30
+
+- name: Enable Indexer Cluster
+  hosts: ClusterMaster
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Include tasks from enable_indexer.yml
+      include_tasks: enable_indexer.yml
+
+   
+- name: Configure License Server
+  hosts: Management_server
+  become: yes
+  tasks:
+
+    - name: Run Splunk first-time setup
+      command: /opt/splunk/bin/splunk ftr --accept-license
+      become: yes
+      become_user: splunk
+
+    - name: Download Splunk License File to License Server
+      get_url:
+        url: "{{ splunk_license_url }}"
+        dest: /opt/splunk/etc/licenses/developer-license.lic
+        mode: '0644'  # Set proper permissions
+
+    - name: Apply License on License Server
+      command: /opt/splunk/bin/splunk add license /opt/splunk/etc/licenses/developer-license.lic -auth admin:{{ splunk_admin_password }}
+
+    - name: Restart Splunk to Apply License
+      command: /opt/splunk/bin/splunk restart
+
+    - name: Pause
+      run_once: true
+      pause:
+        seconds: 20
+
+- hosts: all_splunk
+  gather_facts: no
+  become: yes
+  become_user: splunk
+  tasks:
+    - name: Load all.yml variables
+      include_vars:
+        file: group_vars/all.yml
+        name: all_data
+
+    - name: Assign Management Server Private IP
+      set_fact:
+        private_ip: "{{ all_data['Management_server']['private_ip'] }}"
+      
+    - name: Configure Splunk License Slave
+      command: >
+        /opt/splunk/bin/splunk edit licenser-localslave -master_uri https://{{ private_ip }}:8089 -auth admin:{{ all_data['splunk_admin_password'] }}
+      when: inventory_hostname != 'Management_server'
+    
+    - name: Restart components
+      become: yes
+      become_user: root
+      command:
+        cmd: /opt/splunk/bin/splunk restart
+    
+    - name: Pause
+      run_once: true
+      pause:
+        seconds: 20
+
+- name: Configure Splunk Users and Search Server
+  hosts: all_splunk:!IFs  # Exclude Intermediate Forwarders (IFs), SH2, and SH3 manually
+  become: yes
+  tasks:
+
+    - name: Exclude SH2 and SH3
+      meta: end_host
+      when: inventory_hostname in ["SH2", "SH3"]
+
+    - name: Add service_admin user to Splunk
+      command: >
+        /opt/splunk/bin/splunk add user service_admin -password SoftMania123
+        -role admin -auth admin:{{ splunk_admin_password }}
+      args:
+        creates: /opt/splunk/var/run/service_admin_added
+      register: add_user_result
+      changed_when: "'already exists' not in add_user_result.stderr"
+
+    - name: Mark service_admin as added
+      file:
+        path: /opt/splunk/var/run/service_admin_added
+        state: touch
+      when: add_user_result.changed
+    
+    - name: Restart components Splunk Users and Search Server
+      become: yes
+      become_user: root
+      command:
+        cmd: /opt/splunk/bin/splunk restart 
+    
+    - name: Pause
+      run_once: true
+      pause:
+        seconds: 20
+
+- name: Add all Splunk components as search peers to Management Server
+  hosts: Management_server
+  become: yes
+  vars:
+    # Create a list of all components with their IPs
+    all_components: >-
+      [
+        {"name": "ClusterMaster", "ip": "{{ ClusterMaster.private_ip }}"},
+        {% for indexer in indexers.values() %}
+          {"name": "Indexer_{{ loop.index }}", "ip": "{{ indexer.private_ip }}"},
+        {% endfor %}
+        {% for sh in search_heads.values() %}
+          {"name": "SearchHead_{{ loop.index }}", "ip": "{{ sh.private_ip }}"},
+        {% endfor %}
+        {"name": "IndexerCluster", "ip": "{{ IFs.private_ip }}"}
+      ]
+
+  tasks:
+    - name: Display components to be added as search peers
+      debug:
+        msg: "Adding {{ item.ip }} ({{ item.name }}) as search peer"
+      loop: "{{ all_components }}"
+
+    - name: Get list of existing search peers
+      command: "/opt/splunk/bin/splunk list search-server -auth admin:{{ splunk_admin_password }}"
+      register: existing_peers
+      changed_when: false
+      failed_when: false
+
+    - name: Add components as search peers (if not already added)
+      command: >-
+        /opt/splunk/bin/splunk add search-server https://{{ item.ip }}:8089
+        -auth admin:{{ splunk_admin_password }}
+        -remoteUsername admin
+        -remotePassword "{{ splunk_admin_password }}"
+      loop: "{{ all_components }}"
+      when: >-
+        item.ip not in (existing_peers.stdout | default(''))
+      register: add_peer_results
+      changed_when: >-
+        "'already exists' not in add_peer_results.results[ansible_loop.index0].stdout"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Restart Splunk if any new peers were added
+      command: /opt/splunk/bin/splunk restart
+      when: add_peer_results is changed
